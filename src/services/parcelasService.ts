@@ -42,6 +42,9 @@ export const getAllParcelas = async (): Promise<Parcela[]> => {
 /**
  * Cria as parcelas de um gasto parcelado, dividindo o valor total igualmente.
  * A última parcela absorve qualquer diferença de arredondamento.
+ * "paga" NÃO é enviada aqui: é uma coluna gerada automaticamente pelo banco
+ * a partir de paga_juliano/paga_lidiane, e começa como false por padrão
+ * assim que as duas colunas nascem como false.
  */
 export const createParcelasForExpense = async (
   gastoId: string,
@@ -56,7 +59,6 @@ export const createParcelasForExpense = async (
     gasto_id: gastoId,
     numero_parcela: i + 1,
     valor_parcela: i === numeroParcelas - 1 ? valorUltima : valorBase,
-    paga: false,
     paga_juliano: false,
     paga_lidiane: false,
   }));
@@ -70,18 +72,14 @@ export const createParcelasForExpense = async (
 };
 
 /**
- * Marca ou desmarca uma parcela como paga (campo único, antigo — mantido
- * por compatibilidade com telas que ainda usam o status combinado).
+ * Marca ou desmarca uma parcela como paga para AMBAS as pessoas de uma vez
+ * (campo antigo — mantido por compatibilidade). O campo "paga" e
+ * "data_pagamento" são recalculados automaticamente pelo banco.
  */
 export const toggleParcelaPaga = async (id: string, paga: boolean): Promise<Parcela> => {
   const { data, error } = await supabase
     .from(TABLE_NAME)
-    .update({
-      paga,
-      paga_juliano: paga,
-      paga_lidiane: paga,
-      data_pagamento: paga ? new Date().toISOString() : null,
-    })
+    .update({ paga_juliano: paga, paga_lidiane: paga })
     .eq('id', id)
     .select()
     .single();
@@ -96,39 +94,28 @@ export const toggleParcelaPaga = async (id: string, paga: boolean): Promise<Parc
 
 /**
  * Marca ou desmarca a parte de UMA pessoa (Juliano ou Lidiane) como paga
- * nesta parcela. O campo "paga" (combinado) é recalculado automaticamente:
- * só fica true quando as duas partes estiverem pagas. "data_pagamento" é
- * preenchida quando as duas partes ficam pagas, e limpa se qualquer uma
- * delas for desmarcada.
+ * nesta parcela.
+ *
+ * IMPORTANTE: atualiza SOMENTE o campo dessa pessoa, em uma única operação
+ * atômica — sem ler o estado atual antes. Isso é o que permite clicar em
+ * qualquer parcela, de qualquer compra, a qualquer momento, em qualquer
+ * ordem (adiantar parcela 3 antes da 2, por exemplo) sem que um clique
+ * "atropele" outro.
+ *
+ * "paga" (combinado) e "data_pagamento" são recalculados automaticamente
+ * pelo banco (coluna gerada + trigger), então não precisam ser enviados
+ * por aqui.
  */
 export const toggleParcelaPagaPessoa = async (
   id: string,
   pessoa: 'Juliano' | 'Lidiane',
   novoPaga: boolean
 ): Promise<Parcela> => {
-  const { data: atual, error: fetchError } = await supabase
-    .from(TABLE_NAME)
-    .select('paga_juliano, paga_lidiane')
-    .eq('id', id)
-    .single();
-
-  if (fetchError) {
-    console.error('Erro ao buscar parcela para atualizar pagamento:', fetchError);
-    throw fetchError;
-  }
-
-  const pagaJuliano = pessoa === 'Juliano' ? novoPaga : atual.paga_juliano;
-  const pagaLidiane = pessoa === 'Lidiane' ? novoPaga : atual.paga_lidiane;
-  const pagaCombinado = pagaJuliano && pagaLidiane;
+  const campo = pessoa === 'Juliano' ? 'paga_juliano' : 'paga_lidiane';
 
   const { data, error } = await supabase
     .from(TABLE_NAME)
-    .update({
-      paga_juliano: pagaJuliano,
-      paga_lidiane: pagaLidiane,
-      paga: pagaCombinado,
-      data_pagamento: pagaCombinado ? new Date().toISOString() : null,
-    })
+    .update({ [campo]: novoPaga })
     .eq('id', id)
     .select()
     .single();

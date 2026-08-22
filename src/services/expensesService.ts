@@ -127,8 +127,11 @@ export const deleteExpense = async (id: string): Promise<void> => {
 };
 
 /**
- * Marca ou desmarca um gasto como pago (campo único, antigo — mantido por
- * compatibilidade com telas que ainda usam o status combinado).
+ * Marca ou desmarca um gasto como pago para AMBAS as pessoas de uma vez
+ * (campo antigo — mantido por compatibilidade com telas que ainda usam o
+ * status combinado). Não precisa mais ler o estado atual antes: atualiza
+ * os dois campos diretamente, e o campo "paga" é recalculado pelo próprio
+ * banco automaticamente.
  * @param id - ID do gasto
  * @param paga - true para marcar como pago, false para desmarcar
  * @returns Promessa contendo o gasto atualizado
@@ -136,7 +139,7 @@ export const deleteExpense = async (id: string): Promise<void> => {
 export const toggleExpensePaga = async (id: string, paga: boolean): Promise<Expense> => {
   const { data, error } = await supabase
     .from(TABLE_NAME)
-    .update({ paga, paga_juliano: paga, paga_lidiane: paga })
+    .update({ paga_juliano: paga, paga_lidiane: paga })
     .eq('id', id)
     .select()
     .single();
@@ -151,8 +154,18 @@ export const toggleExpensePaga = async (id: string, paga: boolean): Promise<Expe
 
 /**
  * Marca ou desmarca a parte de UMA pessoa (Juliano ou Lidiane) como paga
- * neste gasto. O campo "paga" (combinado) é recalculado automaticamente:
- * só fica true quando as duas partes estiverem pagas.
+ * neste gasto.
+ *
+ * IMPORTANTE: atualiza SOMENTE o campo dessa pessoa, em uma única operação
+ * atômica — não lê o estado atual antes de escrever. Isso permite clicar
+ * em qualquer toggle, de qualquer compra, a qualquer momento, em qualquer
+ * ordem (inclusive "adiantando" pagamentos fora de ordem), sem risco de um
+ * clique "atropelar" outro que aconteceu quase ao mesmo tempo.
+ *
+ * O campo combinado "paga" é recalculado automaticamente pelo banco
+ * (coluna gerada a partir de paga_juliano AND paga_lidiane), então nunca
+ * precisa ser enviado por aqui.
+ *
  * @param id - ID do gasto
  * @param pessoa - Qual pessoa está marcando/desmarcando sua parte
  * @param novoPaga - true para marcar como pago, false para desmarcar
@@ -163,27 +176,11 @@ export const toggleExpensePagaPessoa = async (
   pessoa: 'Juliano' | 'Lidiane',
   novoPaga: boolean
 ): Promise<Expense> => {
-  const { data: atual, error: fetchError } = await supabase
-    .from(TABLE_NAME)
-    .select('paga_juliano, paga_lidiane')
-    .eq('id', id)
-    .single();
-
-  if (fetchError) {
-    console.error('Erro ao buscar gasto para atualizar pagamento:', fetchError);
-    throw fetchError;
-  }
-
-  const pagaJuliano = pessoa === 'Juliano' ? novoPaga : atual.paga_juliano;
-  const pagaLidiane = pessoa === 'Lidiane' ? novoPaga : atual.paga_lidiane;
+  const campo = pessoa === 'Juliano' ? 'paga_juliano' : 'paga_lidiane';
 
   const { data, error } = await supabase
     .from(TABLE_NAME)
-    .update({
-      paga_juliano: pagaJuliano,
-      paga_lidiane: pagaLidiane,
-      paga: pagaJuliano && pagaLidiane,
-    })
+    .update({ [campo]: novoPaga })
     .eq('id', id)
     .select()
     .single();

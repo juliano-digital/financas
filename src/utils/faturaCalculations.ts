@@ -1,129 +1,146 @@
 /**
- * Cálculo EXATO do devido no MÊS ATUAL
- * À vista = comprada neste mês
- * Parcelado = SOMENTE a parcela que vence ESTE mês
+ * Cálculo do resumo financeiro de uma pessoa (Juliano ou Lidiane).
+ *
+ * "Devido no mês":
+ *  - Compras à vista: soma o valor de CADA uma que ainda não foi marcada
+ *    como paga por essa pessoa (todas, valor exato de cada uma).
+ *  - Compras PARCELADAS: para cada compra, soma só o valor da PRÓXIMA
+ *    parcela que essa pessoa ainda não marcou como paga (nunca todas as
+ *    parcelas em aberto, nunca o total da compra). Assim que essa parcela
+ *    é paga, a parcela seguinte assume o lugar automaticamente no cálculo.
+ *
+ * Para que QUALQUER toggle que o usuário consiga clicar sempre mude o
+ * valor do card, o InstallmentsPanel só permite clicar na parcela que
+ * realmente está sendo contada (a próxima não paga) — as demais ficam
+ * desabilitadas até chegar a vez delas.
+ *
+ * "Já pago" é um contador VITALÍCIO: soma tudo que essa pessoa já marcou
+ * como pago (à vista de qualquer mês + qualquer parcela), independente de
+ * quando foi pago.
+ *
+ * O "pago"/"não pago" é sempre específico de cada pessoa
+ * (paga_juliano/paga_lidiane).
+ *
+ * Também retorna "itensDevidos": a lista detalhada de cada item que está
+ * entrando na soma de "devidoNoMes", útil para conferir/depurar o valor.
  */
 
 import type { Expense, Parcela } from '../types/expense';
 
 export type Pessoa = 'Juliano' | 'Lidiane';
 
-export interface ResumoFatura {
-  total: number;        // Devido neste mês
-  pago: number;         // Já pago por ESTA pessoa neste mês
-  restante: number;     // Falta pagar = total - pago
-  totalPagoGeral: number; // Histórico total pago
-  mesInicio: Date;
-  mesFim: Date;
+export interface ItemDevido {
+  id: string;
+  local: string;
+  valor: number;
+  descricao: string;
 }
 
-function parseDataLocal(dataStr: string): Date {
-  const somenteData = (dataStr || '').split('T')[0];
+export interface ResumoAtual {
+  /** Devido: à vista em aberto (todas) + próxima parcela não paga de cada compra parcelada */
+  devidoNoMes: number;
+  /** Contador vitalício: tudo que esta pessoa já marcou como pago, de qualquer mês */
+  pagoTotal: number;
+  /** Detalhamento de cada item somado em devidoNoMes, para conferência */
+  itensDevidos: ItemDevido[];
+}
+
+/**
+ * Converte data_compra (pode vir como "YYYY-MM-DD" simples ou como
+ * timestamp completo "YYYY-MM-DDTHH:mm:ss.ssssss+00:00") para uma Date
+ * local, usando apenas ano/mês/dia.
+ */
+export function parseDataLocal(dataStr: string): Date {
+  const somenteData = dataStr.split('T')[0];
   const [ano, mes, dia] = somenteData.split('-').map(Number);
-  return new Date(ano || 1970, (mes || 1) - 1, dia || 1);
+  return new Date(ano, (mes || 1) - 1, dia || 1);
 }
 
-function addMeses(data: Date, meses: number): Date {
-  return new Date(data.getFullYear(), data.getMonth() + meses, data.getDate());
+/**
+ * Retorna, dentro de uma lista de parcelas de UMA mesma compra, qual é a
+ * "próxima não paga" para a pessoa informada (a de menor número que ainda
+ * não foi marcada como paga por ela). Retorna undefined se todas já
+ * estiverem pagas.
+ */
+export function encontrarProximaParcelaNaoPaga(
+  parcelasDoGasto: Parcela[],
+  pessoa: Pessoa
+): Parcela | undefined {
+  const pagoPor = (p: Parcela) => (pessoa === 'Juliano' ? p.paga_juliano : p.paga_lidiane);
+  const ordenadas = [...parcelasDoGasto].sort((a, b) => a.numero_parcela - b.numero_parcela);
+  return ordenadas.find((p) => !pagoPor(p));
 }
 
-export function getMesAtual(hoje: Date = new Date()): { inicio: Date; fim: Date } {
-  const inicio = new Date(hoje.getFullYear(), hoje.getMonth(), 1, 0, 0, 0, 0);
-  const fim = new Date(hoje.getFullYear(), hoje.getMonth() + 1, 0, 23, 59, 59, 999);
-  return { inicio, fim };
-}
-
-// Verifica se duas datas são do MESMO mês e ano
-function mesmoMes(a: Date, b: Date): boolean {
-  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth();
-}
-
-function pagoPorPessoa(
-  pessoa: Pessoa,
-  pagaJuliano?: boolean | null,
-  pagaLidiane?: boolean | null
-): boolean {
-  return pessoa === 'Juliano' ? !!pagaJuliano : !!pagaLidiane;
-}
-
-export function calcularFatura(
+export function calcularResumoAtual(
   expenses: Expense[],
   parcelas: Parcela[],
   pessoa: Pessoa,
-  hoje: Date = new Date()
-): ResumoFatura {
-  const { inicio: mesAtualInicio } = getMesAtual(hoje);
+  _hoje: Date = new Date()
+): ResumoAtual {
+  let devidoNoMes = 0;
+  let pagoTotal = 0;
+  const itensDevidos: ItemDevido[] = [];
 
-  let total = 0;
-  let pago = 0;
-  let totalPagoGeral = 0;
+  const pagoPor = (jaPagouJuliano: boolean, jaPagouLidiane: boolean): boolean =>
+    pessoa === 'Juliano' ? jaPagouJuliano : jaPagouLidiane;
 
-  // ======================================
-  // 1. COMPRAS À VISTA — SOMENTE do mês atual
-  // ======================================
+  // Compras à vista: cada uma soma no "devido" se não estiver paga por essa
+  // pessoa, ou no "pago" se já estiver — sem filtro de mês.
   for (const expense of expenses) {
     if (expense.forma_pagamento !== 'a_vista') continue;
 
-    const dataCompra = parseDataLocal(expense.data_compra);
-
-    // ✅ SÓ entra se foi comprada EXATAMENTE neste mês
-    if (!mesmoMes(dataCompra, mesAtualInicio)) continue;
-
     const parte = expense.valor / 2;
-    total += parte;
-
-    if (pagoPorPessoa(pessoa, expense.paga_juliano, expense.paga_lidiane)) {
-      pago += parte;
-      totalPagoGeral += parte;
+    if (pagoPor(expense.paga_juliano, expense.paga_lidiane)) {
+      pagoTotal += parte;
+    } else {
+      devidoNoMes += parte;
+      itensDevidos.push({
+        id: expense.id,
+        local: expense.local,
+        valor: parte,
+        descricao: 'À vista',
+      });
     }
   }
 
-  // ======================================
-  // 2. COMPRAS PARCELADAS — SÓ a parcela DESTE MÊS
-  // ======================================
+  // Agrupa parcelas por compra, somando "já pago" para todas as parcelas
+  // pagas por essa pessoa, de qualquer compra.
   const parcelasPorGasto = new Map<string, Parcela[]>();
-  for (const p of parcelas) {
-    const lista = parcelasPorGasto.get(p.gasto_id) || [];
-    lista.push(p);
-    parcelasPorGasto.set(p.gasto_id, lista);
+  for (const parcela of parcelas) {
+    const lista = parcelasPorGasto.get(parcela.gasto_id) ?? [];
+    lista.push(parcela);
+    parcelasPorGasto.set(parcela.gasto_id, lista);
 
-    // Histórico: soma tudo que já foi pago em qualquer mês
-    if (pagoPorPessoa(pessoa, p.paga_juliano, p.paga_lidiane)) {
-      totalPagoGeral += p.valor_parcela / 2;
+    if (pagoPor(parcela.paga_juliano, parcela.paga_lidiane)) {
+      pagoTotal += parcela.valor_parcela / 2;
     }
   }
 
-  for (const expense of expenses) {
-    if (expense.forma_pagamento !== 'parcelado') continue;
+  // Para o "devido": em cada compra parcelada, conta só a parcela seguinte
+  // que essa pessoa ainda não pagou — nunca todas as parcelas em aberto.
+  for (const [gastoId, lista] of parcelasPorGasto) {
+    const proximaNaoPaga = encontrarProximaParcelaNaoPaga(lista, pessoa);
 
-    const listaParcelas = parcelasPorGasto.get(expense.id);
-    if (!listaParcelas?.length) continue;
+    if (proximaNaoPaga) {
+      const parte = proximaNaoPaga.valor_parcela / 2;
+      devidoNoMes += parte;
 
-    const mesDaCompra = parseDataLocal(expense.data_compra);
-
-    // Encontra a parcela que vence EXATAMENTE neste mês
-    const parcelaDoMes = listaParcelas.find((parcela) => {
-      const mesVencimento = addMeses(mesDaCompra, parcela.numero_parcela - 1);
-      return mesmoMes(mesVencimento, mesAtualInicio);
-    });
-
-    // ✅ Se tem parcela neste mês → SOMA ELA APENAS
-    if (parcelaDoMes) {
-      const valorParcela = parcelaDoMes.valor_parcela / 2;
-      total += valorParcela;
-
-      if (pagoPorPessoa(pessoa, parcelaDoMes.paga_juliano, parcelaDoMes.paga_lidiane)) {
-        pago += valorParcela;
-      }
+      const gastoRelacionado = expenses.find((e) => e.id === gastoId);
+      itensDevidos.push({
+        id: proximaNaoPaga.id,
+        local: gastoRelacionado ? gastoRelacionado.local : 'Compra parcelada',
+        valor: parte,
+        descricao: `Parcela ${proximaNaoPaga.numero_parcela}${
+          gastoRelacionado?.numero_parcelas ? ` de ${gastoRelacionado.numero_parcelas}` : ''
+        }`,
+      });
     }
   }
 
-  return {
-    total,           // 💰 Exatamente o que vence neste mês
-    pago,            // ✅ Já pago neste mês
-    restante: Math.max(0, total - pago), // ⏳ Falta pagar
-    totalPagoGeral, // 📊 Total histórico pago
-    mesInicio: mesAtualInicio,
-    mesFim: getMesAtual(hoje).fim,
-  };
+  return { devidoNoMes, pagoTotal, itensDevidos };
+}
+
+/** Retorna { ano, mes } do mês atual (mes 0-indexado) */
+export function getMesAnoAtual(hoje: Date = new Date()): { ano: number; mes: number } {
+  return { ano: hoje.getFullYear(), mes: hoje.getMonth() };
 }

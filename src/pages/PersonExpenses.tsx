@@ -1,19 +1,27 @@
 /**
- * Página PersonExpenses - Mostra TODAS as compras, com a parte (metade)
- * de cada uma atribuída à pessoa da página. Compras parceladas podem ser
- * expandidas para ver e marcar cada parcela como paga. Qualquer compra
- * pode ser marcada como paga, deixando a linha verde escura. Compras
- * também podem ser editadas através de um modal.
+ * Página PersonExpenses - Mostra as compras do mês/dia selecionado (filtro
+ * só afeta a TABELA abaixo), com a parte (metade) de cada uma atribuída à
+ * pessoa da página. Compras parceladas podem ser expandidas para ver e
+ * marcar cada parcela como paga. Qualquer compra pode ser marcada como
+ * paga, deixando a linha verde escura. Compras também podem ser editadas
+ * através de um modal.
  *
  * O pagamento é controlado SEPARADAMENTE por pessoa: quando o Juliano marca
  * uma compra (ou parcela) como paga, isso só afeta a página dele — a página
  * da Lidiane continua mostrando aquele valor como não pago até ela também
  * marcar a parte dela.
  *
- * Único card da página mostra o total do MÊS ATUAL (mês civil: dia 1 até o
- * último dia do mês): contas à vista feitas neste mês + a parcela que "mora"
- * neste mês em cada compra parcelada. No dia 1 do mês seguinte, zera
- * automaticamente e começa a contagem do novo mês.
+ * O card mostra a data de hoje (atualiza sozinha quando o dia vira) e dois
+ * números:
+ *  - "Devido no mês": à vista não pagas (todas) + o valor da PRÓXIMA
+ *    parcela não paga de cada compra parcelada (nunca o total da compra).
+ *    Qualquer toggle clicado — parcela 1, 2, 3... ou à vista — muda esse
+ *    valor na hora.
+ *  - "Já pago": contador vitalício de tudo que já foi marcado como pago,
+ *    de qualquer mês.
+ *
+ * Abaixo do card tem um detalhamento (temporário, para conferência) de
+ * cada item que está entrando na conta do "devido no mês".
  */
 
 import React, { useState, useMemo, useEffect } from 'react';
@@ -24,10 +32,10 @@ import { EditExpenseModal } from '../components/expenses/EditExpenseModal';
 import { useExpenses } from '../hooks/useExpenses';
 import { useAllParcelas } from '../hooks/useParcelas';
 import { formatCurrency, formatDateTime, formatPaymentMethod } from '../utils/formatCurrency';
-import { calcularFatura } from '../utils/faturaCalculations';
+import { calcularResumoAtual, parseDataLocal, getMesAnoAtual } from '../utils/faturaCalculations';
 import type { Expense } from '../types/expense';
 
-// Checa a cada 1 minuto a virada do mês
+// Checa a cada minuto se o dia virou, pra atualizar a data exibida e recalcular o mês
 const CHECK_INTERVAL_MS = 60 * 1000;
 
 const PESSOAS_VALIDAS: Record<string, 'Juliano' | 'Lidiane'> = {
@@ -35,8 +43,36 @@ const PESSOAS_VALIDAS: Record<string, 'Juliano' | 'Lidiane'> = {
   lidiane: 'Lidiane',
 };
 
-const formatNomeMes = (data: Date): string =>
-  data.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+const NOMES_MES = [
+  'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
+  'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro',
+];
+
+interface MesRef {
+  ano: number;
+  mes: number; // 0-indexado
+}
+
+function mesRefKey(m: MesRef): string {
+  return `${m.ano}-${m.mes}`;
+}
+
+/** Gera uma lista de meses para o seletor: 11 meses pra trás e 2 pra frente */
+function gerarOpcoesMeses(hoje: Date): MesRef[] {
+  const opcoes: MesRef[] = [];
+  for (let i = -11; i <= 2; i++) {
+    const d = new Date(hoje.getFullYear(), hoje.getMonth() + i, 1);
+    opcoes.push({ ano: d.getFullYear(), mes: d.getMonth() });
+  }
+  return opcoes;
+}
+
+function diasNoMes(ano: number, mes: number): number {
+  return new Date(ano, mes + 1, 0).getDate();
+}
+
+const formatDataCompleta = (data: Date): string =>
+  data.toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' });
 
 export const PersonExpenses: React.FC = () => {
   const { pessoa } = useParams<{ pessoa: string }>();
@@ -45,8 +81,10 @@ export const PersonExpenses: React.FC = () => {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [editingExpense, setEditingExpense] = useState<Expense | null>(null);
+  const [mostrarDetalhamento, setMostrarDetalhamento] = useState(false);
 
-  // Data de referência — atualiza sozinho ao virar o mês
+  // Data de hoje, usada para o card. Atualizada periodicamente para trocar
+  // sozinha quando o dia virar, sem precisar recarregar a página.
   const [agora, setAgora] = useState<Date>(new Date());
 
   useEffect(() => {
@@ -54,13 +92,39 @@ export const PersonExpenses: React.FC = () => {
     return () => clearInterval(interval);
   }, []);
 
+  // Filtro de mês/dia: afeta SÓ a tabela de compras, não o card
+  const [selectedMes, setSelectedMes] = useState<MesRef>(() => {
+    const { ano, mes } = getMesAnoAtual();
+    return { ano, mes };
+  });
+  const [selectedDay, setSelectedDay] = useState<number | null>(null);
+
+  const opcoesMeses = useMemo(() => gerarOpcoesMeses(new Date()), []);
+
+  const handleMonthChange = (value: string) => {
+    const [ano, mes] = value.split('-').map(Number);
+    setSelectedMes({ ano, mes });
+    setSelectedDay(null);
+  };
+
   const nomePessoa = pessoa ? PESSOAS_VALIDAS[pessoa.toLowerCase()] : undefined;
 
-  // Recalcula automaticamente quando os dados mudam
-  const resumoFatura = useMemo(
-    () => (nomePessoa ? calcularFatura(expenses, parcelas, nomePessoa, agora) : null),
+  // Card: baseado na data de hoje, reage a qualquer toggle na hora
+  const resumo = useMemo(
+    () => (nomePessoa ? calcularResumoAtual(expenses, parcelas, nomePessoa, agora) : null),
     [expenses, parcelas, nomePessoa, agora]
   );
+
+  // Tabela: filtrada pelo mês/dia selecionado (independente do card)
+  const expensesFiltrados = useMemo(() => {
+    return expenses.filter((e) => {
+      const data = parseDataLocal(e.data_compra);
+      const mesmoMes = data.getFullYear() === selectedMes.ano && data.getMonth() === selectedMes.mes;
+      if (!mesmoMes) return false;
+      if (selectedDay !== null && data.getDate() !== selectedDay) return false;
+      return true;
+    });
+  }, [expenses, selectedMes, selectedDay]);
 
   if (!nomePessoa) {
     return (
@@ -76,7 +140,8 @@ export const PersonExpenses: React.FC = () => {
   }
 
   const corDestaque = nomePessoa === 'Juliano' ? 'blue' : 'pink';
-  const faturaCarregando = loading || loadingParcelas;
+  const carregando = loading || loadingParcelas;
+  const totalDiasNoMes = diasNoMes(selectedMes.ano, selectedMes.mes);
 
   const pagaPelaPessoa = (expense: Expense): boolean =>
     nomePessoa === 'Juliano' ? expense.paga_juliano : expense.paga_lidiane;
@@ -88,11 +153,9 @@ export const PersonExpenses: React.FC = () => {
   const handleTogglePaga = async (expense: Expense) => {
     try {
       setTogglingId(expense.id);
-      const novoEstado = !pagaPelaPessoa(expense);
-      await togglePagaPessoa(expense.id, nomePessoa, novoEstado);
-      await refetchParcelas();
+      await togglePagaPessoa(expense.id, nomePessoa, !pagaPelaPessoa(expense));
     } catch (err) {
-      console.error('Erro ao atualizar status de pagamento:', err);
+      console.error(err);
     } finally {
       setTogglingId(null);
     }
@@ -108,32 +171,63 @@ export const PersonExpenses: React.FC = () => {
           </div>
         )}
 
-        {/* CARD PRINCIPAL: VALOR DO MÊS ATUAL */}
+        {/* Card: mostra a data de hoje + devido no mês (reage a qualquer toggle) + já pago (vitalício) */}
         <div className="rounded-lg p-6 text-white shadow-lg bg-gradient-to-br from-gray-800 via-gray-700 to-gray-900">
           <div className="flex items-center justify-between">
-            <h3 className="text-lg font-semibold opacity-95">
-              💳 Falta Pagar — {nomePessoa}
-            </h3>
+            <h3 className="text-lg font-semibold opacity-95">💳 Falta Pagar — {nomePessoa}</h3>
             <span className="text-3xl">🧾</span>
           </div>
-          {faturaCarregando || !resumoFatura ? (
+          <p className="text-xs opacity-60 mt-1 capitalize">{formatDataCompleta(agora)}</p>
+
+          {carregando || !resumo ? (
             <div className="text-2xl font-bold mt-6 animate-pulse">Carregando...</div>
           ) : (
             <>
-              <div className="text-4xl font-bold mt-6">{formatCurrency(resumoFatura.restante)}</div>
-              <p className="text-sm opacity-80 mt-1">ainda falta {nomePessoa.toLowerCase()} pagar</p>
-              <div className="flex gap-6 mt-4 text-sm opacity-90 flex-wrap">
-                <span>Total do mês: {formatCurrency(resumoFatura.total)}</span>
-                <span>Já pago: {formatCurrency(resumoFatura.pago)}</span>
+              <div className="text-4xl font-bold mt-6">{formatCurrency(resumo.devidoNoMes)}</div>
+              <p className="text-sm opacity-80 mt-1">devido neste mês</p>
+              <div className="flex gap-6 mt-4 text-sm opacity-90">
+                <span>Já pago (total): {formatCurrency(resumo.pagoTotal)}</span>
               </div>
-              <p className="text-xs opacity-60 mt-3 capitalize">
-                Referente a {formatNomeMes(resumoFatura.mesInicio)}
-              </p>
+              <button
+                onClick={() => setMostrarDetalhamento((prev) => !prev)}
+                className="mt-4 text-xs font-semibold text-blue-300 hover:text-blue-200 underline"
+              >
+                {mostrarDetalhamento ? 'Ocultar detalhamento ▲' : 'Ver detalhamento do valor devido ▼'}
+              </button>
             </>
           )}
         </div>
 
-        {/* Botão de acesso às anotações */}
+        {/* Detalhamento temporário: lista cada item que compõe o "devido no mês",
+            para conferência. Pode ser removido depois que o valor for validado. */}
+        {mostrarDetalhamento && resumo && (
+          <div className="bg-white border border-gray-200 rounded-lg shadow-sm">
+            <div className="px-5 py-3 border-b border-gray-200 bg-gray-50 rounded-t-lg">
+              <h4 className="font-bold text-gray-700 text-sm">
+                🔍 Detalhamento — {resumo.itensDevidos.length}{' '}
+                {resumo.itensDevidos.length === 1 ? 'item' : 'itens'} somando{' '}
+                {formatCurrency(resumo.devidoNoMes)}
+              </h4>
+            </div>
+            <div className="max-h-96 overflow-y-auto divide-y divide-gray-100">
+              {resumo.itensDevidos.length === 0 ? (
+                <p className="text-sm text-gray-500 px-5 py-4">Nenhum item em aberto.</p>
+              ) : (
+                resumo.itensDevidos.map((item, idx) => (
+                  <div key={`${item.id}-${idx}`} className="flex items-center justify-between px-5 py-2 text-sm">
+                    <div>
+                      <span className="font-medium text-gray-800">{item.local}</span>
+                      <span className="text-gray-500 ml-2">({item.descricao})</span>
+                    </div>
+                    <span className="font-semibold text-gray-700">{formatCurrency(item.valor)}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Botão de acesso às anotações privadas desta pessoa */}
         <Link
           to={`/notas/${nomePessoa.toLowerCase()}`}
           className={`flex items-center justify-center gap-2 w-full rounded-lg py-3 font-semibold shadow-sm border-2 transition-colors ${
@@ -145,15 +239,42 @@ export const PersonExpenses: React.FC = () => {
           📝 Minhas Anotações
         </Link>
 
-        {/* Lista de Compras */}
-        <Card title="📋 Todas as Compras">
+        {/* Seletor de mês/dia: só filtra a tabela abaixo */}
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+          <select
+            value={`${selectedMes.ano}-${selectedMes.mes}`}
+            onChange={(e) => handleMonthChange(e.target.value)}
+            className="border border-gray-300 rounded-lg px-3 py-2 text-sm font-medium text-gray-700 bg-white"
+          >
+            {opcoesMeses.map((m) => (
+              <option key={mesRefKey(m)} value={`${m.ano}-${m.mes}`}>
+                {NOMES_MES[m.mes]} de {m.ano}
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={selectedDay ?? ''}
+            onChange={(e) => setSelectedDay(e.target.value === '' ? null : Number(e.target.value))}
+            className="border border-gray-300 rounded-lg px-3 py-2 text-sm font-medium text-gray-700 bg-white"
+          >
+            <option value="">Todos os dias</option>
+            {Array.from({ length: totalDiasNoMes }, (_, i) => i + 1).map((dia) => (
+              <option key={dia} value={dia}>
+                Dia {dia}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <Card title="📋 Compras do período selecionado">
           {loading ? (
             <div className="text-center py-12">
               <p className="text-gray-600">Carregando gastos...</p>
             </div>
-          ) : expenses.length === 0 ? (
+          ) : expensesFiltrados.length === 0 ? (
             <div className="text-center py-12">
-              <p className="text-gray-600 text-lg">Nenhuma compra registrada ainda.</p>
+              <p className="text-gray-600 text-lg">Nenhuma compra neste período.</p>
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -175,7 +296,7 @@ export const PersonExpenses: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {expenses.map((expense, idx) => {
+                  {expensesFiltrados.map((expense, idx) => {
                     const isParcelado = expense.forma_pagamento === 'parcelado';
                     const isExpanded = expandedId === expense.id;
                     const isToggling = togglingId === expense.id;
@@ -256,9 +377,7 @@ export const PersonExpenses: React.FC = () => {
                               <InstallmentsPanel
                                 gastoId={expense.id}
                                 pessoa={nomePessoa}
-                                onParcelaToggled={async () => {
-                                  await refetchParcelas();
-                                }}
+                                onParcelaToggled={refetchParcelas}
                               />
                             </td>
                           </tr>
