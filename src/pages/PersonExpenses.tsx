@@ -11,14 +11,15 @@
  * da Lidiane continua mostrando aquele valor como não pago até ela também
  * marcar a parte dela.
  *
- * O card mostra a data de hoje (atualiza sozinha quando o dia vira) e dois
+ * O card mostra a data de hoje (atualiza sozinha quando o dia vira) e três
  * números:
- *  - "Devido no mês": à vista não pagas (todas) + o valor da PRÓXIMA
- *    parcela não paga de cada compra parcelada (nunca o total da compra).
- *    Qualquer toggle clicado — parcela 1, 2, 3... ou à vista — muda esse
- *    valor na hora.
+ *  - "À vista devido": soma de cada compra à vista não paga.
+ *  - "Parcelas devidas": soma de cada parcela não paga (todas, não só a
+ *    próxima de cada compra).
  *  - "Já pago": contador vitalício de tudo que já foi marcado como pago,
  *    de qualquer mês.
+ * Qualquer toggle clicado — parcela ou à vista, em qualquer ordem — muda
+ * o campo correspondente na hora.
  *
  * Abaixo do card tem um detalhamento (temporário, para conferência) de
  * cada item que está entrando na conta do "devido no mês".
@@ -77,7 +78,7 @@ const formatDataCompleta = (data: Date): string =>
 export const PersonExpenses: React.FC = () => {
   const { pessoa } = useParams<{ pessoa: string }>();
   const { expenses, loading, error, togglePagaPessoa, editExpense } = useExpenses();
-  const { parcelas, loading: loadingParcelas, refetch: refetchParcelas } = useAllParcelas();
+  const { parcelas, loading: loadingParcelas, updateLocal: updateParcelaLocal } = useAllParcelas();
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [editingExpense, setEditingExpense] = useState<Expense | null>(null);
@@ -171,7 +172,7 @@ export const PersonExpenses: React.FC = () => {
           </div>
         )}
 
-        {/* Card: mostra a data de hoje + devido no mês (reage a qualquer toggle) + já pago (vitalício) */}
+        {/* Card: mostra a data de hoje + à vista devido + parcelas devidas (separados) + já pago (vitalício) */}
         <div className="rounded-lg p-6 text-white shadow-lg bg-gradient-to-br from-gray-800 via-gray-700 to-gray-900">
           <div className="flex items-center justify-between">
             <h3 className="text-lg font-semibold opacity-95">💳 Falta Pagar — {nomePessoa}</h3>
@@ -183,9 +184,18 @@ export const PersonExpenses: React.FC = () => {
             <div className="text-2xl font-bold mt-6 animate-pulse">Carregando...</div>
           ) : (
             <>
-              <div className="text-4xl font-bold mt-6">{formatCurrency(resumo.devidoNoMes)}</div>
-              <p className="text-sm opacity-80 mt-1">devido neste mês</p>
-              <div className="flex gap-6 mt-4 text-sm opacity-90">
+              <div className="grid grid-cols-2 gap-4 mt-6">
+                <div className="bg-white/10 rounded-lg px-4 py-3">
+                  <p className="text-xs opacity-70">🛒 À vista devido</p>
+                  <p className="text-2xl font-bold mt-1">{formatCurrency(resumo.devidoAvista)}</p>
+                </div>
+                <div className="bg-white/10 rounded-lg px-4 py-3">
+                  <p className="text-xs opacity-70">📅 Parcelas devidas</p>
+                  <p className="text-2xl font-bold mt-1">{formatCurrency(resumo.devidoParcelas)}</p>
+                </div>
+              </div>
+              <div className="flex items-center justify-between mt-4 text-sm opacity-90 border-t border-white/10 pt-3">
+                <span>Total devido: {formatCurrency(resumo.devidoNoMes)}</span>
                 <span>Já pago (total): {formatCurrency(resumo.pagoTotal)}</span>
               </div>
               <button
@@ -377,7 +387,7 @@ export const PersonExpenses: React.FC = () => {
                               <InstallmentsPanel
                                 gastoId={expense.id}
                                 pessoa={nomePessoa}
-                                onParcelaToggled={refetchParcelas}
+                                onParcelaToggled={updateParcelaLocal}
                               />
                             </td>
                           </tr>
