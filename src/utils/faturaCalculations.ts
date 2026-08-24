@@ -21,8 +21,12 @@
  * O "pago"/"não pago" é sempre específico de cada pessoa
  * (paga_juliano/paga_lidiane).
  *
- * Também retorna "itensDevidos": a lista detalhada de cada item que está
- * entrando na soma de "devidoNoMes", útil para conferir/depurar o valor.
+ * "itensDevidos": lista detalhada de cada item que está entrando na soma
+ * de "devidoNoMes":
+ *  - Uma linha por compra à vista em aberto.
+ *  - Uma ÚNICA linha por compra PARCELADA em aberto (não uma por parcela),
+ *    somando o valor de todas as parcelas ainda não pagas dessa compra, com
+ *    a descrição mostrando quantas já foram pagas (ex: "Parcela 4 de 10").
  */
 
 import type { Expense, Parcela } from '../types/expense';
@@ -95,25 +99,40 @@ export function calcularResumoAtual(
     }
   }
 
-  // Parcelas: CADA parcela conta individualmente (paga ou não) no
-  // "devidoParcelas" — sem escolher "só a próxima". Qualquer toggle, em
-  // qualquer ordem, reflete direto no card pelo valor exato daquela parcela.
+  // Agrupa parcelas por compra
+  const parcelasPorGasto = new Map<string, Parcela[]>();
   for (const parcela of parcelas) {
-    const parte = parcela.valor_parcela / 2;
+    const lista = parcelasPorGasto.get(parcela.gasto_id) ?? [];
+    lista.push(parcela);
+    parcelasPorGasto.set(parcela.gasto_id, lista);
+  }
 
-    if (pagoPor(parcela.paga_juliano, parcela.paga_lidiane)) {
-      pagoTotal += parte;
-    } else {
-      devidoParcelas += parte;
+  // Para cada compra parcelada: soma o valor de TODAS as parcelas em aberto
+  // dela (isso é o que garante que qualquer toggle sempre muda o card), mas
+  // no detalhamento mostra só UMA linha por compra, com o total ainda devido
+  // e quantas parcelas já foram pagas.
+  for (const [gastoId, listaDoGasto] of parcelasPorGasto) {
+    const gastoRelacionado = expenses.find((e) => e.id === gastoId);
+    const totalParcelas = gastoRelacionado?.numero_parcelas ?? listaDoGasto.length;
+    const pagasCount = listaDoGasto.filter((p) => pagoPor(p.paga_juliano, p.paga_lidiane)).length;
 
-      const gastoRelacionado = expenses.find((e) => e.id === parcela.gasto_id);
+    let somaNaoPagaDoGasto = 0;
+    for (const parcela of listaDoGasto) {
+      const parte = parcela.valor_parcela / 2;
+      if (pagoPor(parcela.paga_juliano, parcela.paga_lidiane)) {
+        pagoTotal += parte;
+      } else {
+        devidoParcelas += parte;
+        somaNaoPagaDoGasto += parte;
+      }
+    }
+
+    if (somaNaoPagaDoGasto > 0) {
       itensDevidos.push({
-        id: parcela.id,
+        id: gastoId,
         local: gastoRelacionado ? gastoRelacionado.local : 'Compra parcelada',
-        valor: parte,
-        descricao: `Parcela ${parcela.numero_parcela}${
-          gastoRelacionado?.numero_parcelas ? ` de ${gastoRelacionado.numero_parcelas}` : ''
-        }`,
+        valor: somaNaoPagaDoGasto,
+        descricao: `Parcela ${pagasCount} de ${totalParcelas}`,
         tipo: 'parcela',
       });
     }
