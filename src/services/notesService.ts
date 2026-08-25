@@ -44,6 +44,25 @@ export const createNote = async (pessoa: 'Juliano' | 'Lidiane', texto: string): 
 };
 
 /**
+ * Atualiza o texto de uma anotação existente
+ */
+export const updateNote = async (id: string, texto: string): Promise<Note> => {
+  const { data, error } = await supabase
+    .from(TABLE_NAME)
+    .update({ texto })
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (error) {
+    console.error('Erro ao atualizar anotação:', error);
+    throw error;
+  }
+
+  return data;
+};
+
+/**
  * Deleta uma anotação
  */
 export const deleteNote = async (id: string): Promise<void> => {

@@ -4,13 +4,14 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import type { Note } from '../types/note';
-import { getNotesByPessoa, createNote, deleteNote } from '../services/notesService';
+import { getNotesByPessoa, createNote, updateNote, deleteNote } from '../services/notesService';
 
 interface UseNotesReturn {
   notes: Note[];
   loading: boolean;
   error: string | null;
   addNote: (texto: string) => Promise<void>;
+  editNote: (id: string, texto: string) => Promise<void>;
   removeNote: (id: string) => Promise<void>;
 }
 
@@ -47,6 +48,17 @@ export const useNotes = (pessoa: 'Juliano' | 'Lidiane'): UseNotesReturn => {
     }
   };
 
+  const editNote = async (id: string, texto: string) => {
+    try {
+      setError(null);
+      const updated = await updateNote(id, texto);
+      setNotes((prev) => prev.map((n) => (n.id === id ? updated : n)));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Erro ao atualizar anotação');
+      throw err;
+    }
+  };
+
   const removeNote = async (id: string) => {
     try {
       setError(null);
@@ -58,5 +70,5 @@ export const useNotes = (pessoa: 'Juliano' | 'Lidiane'): UseNotesReturn => {
     }
   };
 
-  return { notes, loading, error, addNote, removeNote };
+  return { notes, loading, error, addNote, editNote, removeNote };
 };
