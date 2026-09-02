@@ -132,14 +132,24 @@ export const deleteExpense = async (id: string): Promise<void> => {
  * status combinado). Não precisa mais ler o estado atual antes: atualiza
  * os dois campos diretamente, e o campo "paga" é recalculado pelo próprio
  * banco automaticamente.
+ *
+ * Também grava a data/hora atual em AMBAS as colunas de data de pagamento
+ * quando "paga" é true, e limpa (null) quando é false.
  * @param id - ID do gasto
  * @param paga - true para marcar como pago, false para desmarcar
  * @returns Promessa contendo o gasto atualizado
  */
 export const toggleExpensePaga = async (id: string, paga: boolean): Promise<Expense> => {
+  const dataPagamento = paga ? new Date().toISOString() : null;
+
   const { data, error } = await supabase
     .from(TABLE_NAME)
-    .update({ paga_juliano: paga, paga_lidiane: paga })
+    .update({
+      paga_juliano: paga,
+      paga_lidiane: paga,
+      data_pagamento_juliano: dataPagamento,
+      data_pagamento_lidiane: dataPagamento,
+    })
     .eq('id', id)
     .select()
     .single();
@@ -162,6 +172,10 @@ export const toggleExpensePaga = async (id: string, paga: boolean): Promise<Expe
  * ordem (inclusive "adiantando" pagamentos fora de ordem), sem risco de um
  * clique "atropelar" outro que aconteceu quase ao mesmo tempo.
  *
+ * Junto com o campo de "pago", também grava (ou limpa) a data/hora exata
+ * em que essa pessoa marcou/desmarcou sua parte, para manter um histórico
+ * de quando cada pagamento foi feito.
+ *
  * O campo combinado "paga" é recalculado automaticamente pelo banco
  * (coluna gerada a partir de paga_juliano AND paga_lidiane), então nunca
  * precisa ser enviado por aqui.
@@ -176,11 +190,15 @@ export const toggleExpensePagaPessoa = async (
   pessoa: 'Juliano' | 'Lidiane',
   novoPaga: boolean
 ): Promise<Expense> => {
-  const campo = pessoa === 'Juliano' ? 'paga_juliano' : 'paga_lidiane';
+  const campoPaga = pessoa === 'Juliano' ? 'paga_juliano' : 'paga_lidiane';
+  const campoData = pessoa === 'Juliano' ? 'data_pagamento_juliano' : 'data_pagamento_lidiane';
 
   const { data, error } = await supabase
     .from(TABLE_NAME)
-    .update({ [campo]: novoPaga })
+    .update({
+      [campoPaga]: novoPaga,
+      [campoData]: novoPaga ? new Date().toISOString() : null,
+    })
     .eq('id', id)
     .select()
     .single();

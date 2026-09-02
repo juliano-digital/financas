@@ -151,3 +151,37 @@ export function calcularResumoAtual(
 export function getMesAnoAtual(hoje: Date = new Date()): { ano: number; mes: number } {
   return { ano: hoje.getFullYear(), mes: hoje.getMonth() };
 }
+
+/**
+ * Diz se uma compra ainda está PENDENTE (não totalmente paga) para uma
+ * pessoa específica:
+ *  - À vista: pendente se essa pessoa ainda não marcou a parte dela como paga.
+ *  - Parcelada: pendente se AO MENOS UMA parcela dessa compra ainda não foi
+ *    paga por essa pessoa (mesmo que outras parcelas já tenham sido pagas).
+ *
+ * Usado para "arrastar" compras não pagas para os meses seguintes na
+ * tabela de compras de cada pessoa, até que sejam totalmente quitadas —
+ * assim ninguém precisa voltar no calendário pra achar uma pendência
+ * antiga.
+ *
+ * Se a compra é parcelada mas as parcelas dela ainda não foram carregadas
+ * (lista vazia), retorna false por precaução — evita que a compra "suma"
+ * da tabela por engano antes dos dados chegarem do banco.
+ */
+export function expensePendentePorPessoa(
+  expense: Expense,
+  parcelas: Parcela[],
+  pessoa: Pessoa
+): boolean {
+  const pendentePor = (jaPagouJuliano: boolean, jaPagouLidiane: boolean): boolean =>
+    pessoa === 'Juliano' ? !jaPagouJuliano : !jaPagouLidiane;
+
+  if (expense.forma_pagamento === 'a_vista') {
+    return pendentePor(expense.paga_juliano, expense.paga_lidiane);
+  }
+
+  const parcelasDoGasto = parcelas.filter((p) => p.gasto_id === expense.id);
+  if (parcelasDoGasto.length === 0) return false;
+
+  return parcelasDoGasto.some((p) => pendentePor(p.paga_juliano, p.paga_lidiane));
+}

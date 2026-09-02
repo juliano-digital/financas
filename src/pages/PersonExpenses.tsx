@@ -11,6 +11,23 @@
  * da Lidiane continua mostrando aquele valor como não pago até ela também
  * marcar a parte dela.
  *
+ * PENDÊNCIAS ARRASTAM PARA OS MESES SEGUINTES: quando "Todos os dias" está
+ * selecionado, a tabela mostra as compras do mês escolhido MAIS qualquer
+ * compra de mês anterior que essa pessoa ainda não pagou totalmente
+ * (à vista não marcada, ou parcelada com pelo menos uma parcela em aberto).
+ * Essas pendências continuam aparecendo, mês após mês, até serem quitadas —
+ * ninguém precisa voltar no calendário pra achar uma pendência antiga.
+ * Assim que ficam totalmente pagas por essa pessoa, param de arrastar e só
+ * aparecem no mês original delas, como histórico. Quando um dia específico
+ * é selecionado, o arrasto não se aplica — mostra só o que foi comprado
+ * naquele dia exato.
+ *
+ * Cada vez que uma compra (ou parcela) é marcada como paga, o dia/mês/ano
+ * exato é registrado e fica exibido junto do status "Paga". Para evitar que
+ * um clique acidental apague esse registro, DESMARCAR uma compra já paga
+ * abre um aviso pedindo confirmação antes de executar — marcar como paga
+ * continua acontecendo na hora, sem esse aviso.
+ *
  * O card mostra a data de hoje (atualiza sozinha quando o dia vira) e três
  * números:
  *  - "À vista devido": soma de cada compra à vista não paga.
@@ -30,10 +47,16 @@ import { useParams, Link } from 'react-router-dom';
 import { Layout, Card } from '../components';
 import { InstallmentsPanel } from '../components/expenses/InstallmentsPanel';
 import { EditExpenseModal } from '../components/expenses/EditExpenseModal';
+import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { useExpenses } from '../hooks/useExpenses';
 import { useAllParcelas } from '../hooks/useParcelas';
 import { formatCurrency, formatDateTime, formatPaymentMethod } from '../utils/formatCurrency';
-import { calcularResumoAtual, parseDataLocal, getMesAnoAtual } from '../utils/faturaCalculations';
+import {
+  calcularResumoAtual,
+  parseDataLocal,
+  getMesAnoAtual,
+  expensePendentePorPessoa,
+} from '../utils/faturaCalculations';
 import type { Expense } from '../types/expense';
 
 // Checa a cada minuto se o dia virou, pra atualizar a data exibida e recalcular o mês
@@ -75,6 +98,11 @@ function diasNoMes(ano: number, mes: number): number {
 const formatDataCompleta = (data: Date): string =>
   data.toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' });
 
+/** true se a data (ano/mês) for anterior ao mês de referência informado */
+function ehMesAnterior(data: Date, ref: MesRef): boolean {
+  return data.getFullYear() < ref.ano || (data.getFullYear() === ref.ano && data.getMonth() < ref.mes);
+}
+
 export const PersonExpenses: React.FC = () => {
   const { pessoa } = useParams<{ pessoa: string }>();
   const { expenses, loading, error, togglePagaPessoa, editExpense } = useExpenses();
@@ -83,6 +111,9 @@ export const PersonExpenses: React.FC = () => {
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [editingExpense, setEditingExpense] = useState<Expense | null>(null);
   const [mostrarDetalhamento, setMostrarDetalhamento] = useState(false);
+
+  // Compra à vista aguardando confirmação para ser DESMARCADA (null = nenhum aviso aberto)
+  const [expenseParaDesmarcar, setExpenseParaDesmarcar] = useState<Expense | null>(null);
 
   // Data de hoje, usada para o card. Atualizada periodicamente para trocar
   // sozinha quando o dia virar, sem precisar recarregar a página.
@@ -116,16 +147,33 @@ export const PersonExpenses: React.FC = () => {
     [expenses, parcelas, nomePessoa, agora]
   );
 
-  // Tabela: filtrada pelo mês/dia selecionado (independente do card)
+  // Tabela: compras do mês/dia selecionado + (quando "Todos os dias") as
+  // pendências arrastadas de meses anteriores que essa pessoa ainda não
+  // quitou totalmente.
   const expensesFiltrados = useMemo(() => {
-    return expenses.filter((e) => {
+    const doMesSelecionado = expenses.filter((e) => {
       const data = parseDataLocal(e.data_compra);
       const mesmoMes = data.getFullYear() === selectedMes.ano && data.getMonth() === selectedMes.mes;
       if (!mesmoMes) return false;
       if (selectedDay !== null && data.getDate() !== selectedDay) return false;
       return true;
     });
-  }, [expenses, selectedMes, selectedDay]);
+
+    // Arrasto só faz sentido olhando o mês inteiro (não um dia específico)
+    // e só sabemos calcular pendência de parcelada com a pessoa definida.
+    if (selectedDay !== null || !nomePessoa) return doMesSelecionado;
+
+    const idsJaIncluidos = new Set(doMesSelecionado.map((e) => e.id));
+
+    const arrastadosDeMesesAnteriores = expenses.filter((e) => {
+      if (idsJaIncluidos.has(e.id)) return false;
+      const data = parseDataLocal(e.data_compra);
+      if (!ehMesAnterior(data, selectedMes)) return false;
+      return expensePendentePorPessoa(e, parcelas, nomePessoa);
+    });
+
+    return [...doMesSelecionado, ...arrastadosDeMesesAnteriores];
+  }, [expenses, parcelas, selectedMes, selectedDay, nomePessoa]);
 
   if (!nomePessoa) {
     return (
@@ -147,20 +195,59 @@ export const PersonExpenses: React.FC = () => {
   const pagaPelaPessoa = (expense: Expense): boolean =>
     nomePessoa === 'Juliano' ? expense.paga_juliano : expense.paga_lidiane;
 
+  /** Data em que essa pessoa marcou esta compra como paga (ou undefined/null) */
+  const dataPagamentoDaPessoa = (expense: Expense): string | null | undefined =>
+    nomePessoa === 'Juliano' ? expense.data_pagamento_juliano : expense.data_pagamento_lidiane;
+
+  /** true se essa linha é uma pendência arrastada de um mês anterior ao selecionado */
+  const isArrastada = (expense: Expense): boolean => {
+    const data = parseDataLocal(expense.data_compra);
+    return ehMesAnterior(data, selectedMes);
+  };
+
+  const rotuloMesOrigem = (expense: Expense): string => {
+    const data = parseDataLocal(expense.data_compra);
+    return `${NOMES_MES[data.getMonth()]} de ${data.getFullYear()}`;
+  };
+
   const toggleExpand = (id: string) => {
     setExpandedId((prev) => (prev === id ? null : id));
   };
 
-  const handleTogglePaga = async (expense: Expense) => {
+  const executarTogglePaga = async (expense: Expense, novoPaga: boolean) => {
     try {
       setTogglingId(expense.id);
-      await togglePagaPessoa(expense.id, nomePessoa, !pagaPelaPessoa(expense));
+      await togglePagaPessoa(expense.id, nomePessoa, novoPaga);
     } catch (err) {
       console.error(err);
     } finally {
       setTogglingId(null);
     }
   };
+
+  const handleTogglePaga = async (expense: Expense) => {
+    const estaPaga = pagaPelaPessoa(expense);
+
+    // Marcar como paga: instantâneo, sem confirmação
+    if (!estaPaga) {
+      await executarTogglePaga(expense, true);
+      return;
+    }
+
+    // Desmarcar: pede confirmação antes
+    setExpenseParaDesmarcar(expense);
+  };
+
+  const handleConfirmarDesmarcar = async () => {
+    if (!expenseParaDesmarcar) return;
+    await executarTogglePaga(expenseParaDesmarcar, false);
+    setExpenseParaDesmarcar(null);
+  };
+
+  const subtitleTabela =
+    selectedDay === null
+      ? 'Compras deste mês, mais qualquer pendência de meses anteriores que ainda não foi paga por você'
+      : undefined;
 
   return (
     <Layout navbarTitle={`Parte de ${nomePessoa}`}>
@@ -277,7 +364,7 @@ export const PersonExpenses: React.FC = () => {
           </select>
         </div>
 
-        <Card title="📋 Compras do período selecionado">
+        <Card title="📋 Compras do período selecionado" subtitle={subtitleTabela}>
           {loading ? (
             <div className="text-center py-12">
               <p className="text-gray-600">Carregando gastos...</p>
@@ -311,9 +398,13 @@ export const PersonExpenses: React.FC = () => {
                     const isExpanded = expandedId === expense.id;
                     const isToggling = togglingId === expense.id;
                     const pagaPorMim = pagaPelaPessoa(expense);
+                    const dataPagamento = dataPagamentoDaPessoa(expense);
+                    const arrastada = isArrastada(expense);
 
                     const rowClasses = pagaPorMim
                       ? 'bg-green-700'
+                      : arrastada
+                      ? 'bg-amber-50 hover:bg-amber-100'
                       : idx % 2 === 0
                       ? 'bg-white hover:bg-blue-50'
                       : 'bg-gray-50 hover:bg-blue-50';
@@ -329,7 +420,14 @@ export const PersonExpenses: React.FC = () => {
                     return (
                       <React.Fragment key={expense.id}>
                         <tr className={`border-b border-gray-200 transition-colors ${rowClasses}`}>
-                          <td className={`px-5 py-4 font-medium ${textPrimary}`}>{expense.local}</td>
+                          <td className={`px-5 py-4 font-medium ${textPrimary}`}>
+                            {expense.local}
+                            {arrastada && !pagaPorMim && (
+                              <span className="ml-2 inline-block text-[10px] font-semibold text-amber-800 bg-amber-200 px-2 py-0.5 rounded-full align-middle whitespace-nowrap">
+                                ⏳ Pendente desde {rotuloMesOrigem(expense)}
+                              </span>
+                            )}
+                          </td>
                           <td className={`px-5 py-4 ${textSecondary}`}>{formatCurrency(expense.valor)}</td>
                           <td className={`px-5 py-4 font-bold ${textParte}`}>
                             {formatCurrency(expense.valor / 2)}
@@ -354,18 +452,25 @@ export const PersonExpenses: React.FC = () => {
                             </div>
                           </td>
                           <td className="px-5 py-4 text-center">
-                            <button
-                              onClick={() => handleTogglePaga(expense)}
-                              disabled={isToggling}
-                              title={pagaPorMim ? 'Marcar como não paga' : 'Marcar como paga'}
-                              className={`w-7 h-7 rounded-full border-2 flex items-center justify-center text-sm font-bold transition-colors mx-auto disabled:opacity-50 ${
-                                pagaPorMim
-                                  ? 'bg-green-900 border-green-900 text-white'
-                                  : 'bg-white border-gray-300 text-transparent hover:border-green-400'
-                              }`}
-                            >
-                              {isToggling ? '⏳' : '✓'}
-                            </button>
+                            <div className="flex flex-col items-center gap-1">
+                              <button
+                                onClick={() => handleTogglePaga(expense)}
+                                disabled={isToggling}
+                                title={pagaPorMim ? 'Marcar como não paga' : 'Marcar como paga'}
+                                className={`w-7 h-7 rounded-full border-2 flex items-center justify-center text-sm font-bold transition-colors mx-auto disabled:opacity-50 ${
+                                  pagaPorMim
+                                    ? 'bg-green-900 border-green-900 text-white'
+                                    : 'bg-white border-gray-300 text-transparent hover:border-green-400'
+                                }`}
+                              >
+                                {isToggling ? '⏳' : '✓'}
+                              </button>
+                              {pagaPorMim && dataPagamento && (
+                                <span className={`text-[10px] ${textSecondary}`}>
+                                  em {formatDateTime(dataPagamento)}
+                                </span>
+                              )}
+                            </div>
                           </td>
                           <td className="px-5 py-4 text-center">
                             <button
@@ -406,6 +511,20 @@ export const PersonExpenses: React.FC = () => {
         expense={editingExpense}
         onClose={() => setEditingExpense(null)}
         onSave={editExpense}
+      />
+
+      <ConfirmDialog
+        isOpen={expenseParaDesmarcar !== null}
+        title="Desmarcar compra como paga?"
+        message={
+          expenseParaDesmarcar
+            ? `Você está prestes a desmarcar "${expenseParaDesmarcar.local}" como paga. A data de pagamento registrada será apagada.`
+            : ''
+        }
+        confirmLabel="Desmarcar"
+        isLoading={togglingId === expenseParaDesmarcar?.id}
+        onConfirm={handleConfirmarDesmarcar}
+        onCancel={() => setExpenseParaDesmarcar(null)}
       />
     </Layout>
   );
